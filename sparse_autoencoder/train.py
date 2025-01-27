@@ -14,6 +14,7 @@
 import os
 from dataclasses import dataclass
 from typing import Callable, Iterable, Iterator
+from time import time
 
 import torch
 import torch.distributed as dist
@@ -23,6 +24,8 @@ import triton
 import triton.language as tl
 from sparse_autoencoder.kernels import *
 from torch.distributed import ReduceOp
+
+from sparse_autoencoder.llm import get_acts_iter, get_stats_acts_sample 
 
 RANK = int(os.environ.get("RANK", "0"))
 
@@ -622,7 +625,7 @@ def init_from_data_(ae, stats_acts_sample, comms):
     # encoder initialization (note: in our ablations we couldn't find clear evidence that this is beneficial, this is just to ensure exact match with internal codebase)
     d_model = ae.d_model
     with torch.no_grad():
-        x = torch.randn(256, d_model).cuda().to(stats_acts_sample.dtype)
+        x = torch.randn(128, d_model).cuda().to(stats_acts_sample.dtype)
         x /= x.norm(dim=-1, keepdim=True)
         x += ae.pre_bias.data
         comms.all_broadcast(x)
@@ -682,10 +685,10 @@ class EmaModel:
 @dataclass
 class Config:
     n_op_shards: int = 1
-    n_replicas: int = 8
+    n_replicas: int = 1
 
     n_dirs: int = 32768
-    bs: int = 131072
+    bs: int = 128
     d_model: int = 768
     k: int = 32
     auxk: int = 256
@@ -697,8 +700,8 @@ class Config:
     dead_toks_threshold: int = 10_000_000
     ema_multiplier: float | None = None
     
-    wandb_project: str | None = None
-    wandb_name: str | None = None
+    wandb_project: str | None = 'nnet'
+    wandb_name: str | None = f"pile-topk-128-{time()}"
 
 
 def main():
@@ -706,8 +709,8 @@ def main():
     comms = make_torch_comms(n_op_shards=cfg.n_op_shards, n_replicas=cfg.n_replicas)
 
     ## dataloading is left as an exercise for the reader
-    acts_iter = ...
-    stats_acts_sample = ...
+    acts_iter = get_acts_iter()
+    stats_acts_sample = get_stats_acts_sample()
 
     n_dirs_local = cfg.n_dirs // cfg.n_op_shards
     bs_local = cfg.bs // cfg.n_replicas
@@ -727,7 +730,7 @@ def main():
 
     mse_scale = (
         1 / ((stats_acts_sample.float().mean(dim=0) - stats_acts_sample.float()) ** 2).mean()
-    )
+    ).cuda()
     comms.all_broadcast(mse_scale)
     mse_scale = mse_scale.item()
 
